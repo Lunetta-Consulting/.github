@@ -1,0 +1,71 @@
+name: Reusable • Auto-add issues/PRs to Projects
+
+on:
+  workflow_call:
+    inputs:
+      ORG_PROJECT_ID:
+        description: GraphQL ID (PVT_...) of the org-level Packages project
+        required: true
+        type: string
+      REPO_PROJECT_TITLE:
+        description: Title of the repo-level project (defaults to repo name)
+        required: false
+        default: ${{ github.event.repository.name }}
+        type: string
+    secrets:
+      PROJECTS_PAT:
+        required: true
+
+jobs:
+  add-to-projects:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Add to org & repo projects
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROJECTS_PAT }}
+          script: |
+            const isPR = !!context.payload.pull_request;
+            const nodeId = isPR ? context.payload.pull_request.node_id : context.payload.issue.node_id;
+
+            const addMutation = `
+              mutation($projectId: ID!, $contentId: ID!) {
+                addProjectV2ItemById(input:{ projectId:$projectId, contentId:$contentId }) {
+                  item { id }
+                }
+              }`;
+
+            // 1) Add to org-level project
+            await github.graphql(addMutation, {
+              projectId: "${{ inputs.ORG_PROJECT_ID }}",
+              contentId: nodeId
+            });
+
+            // 2) Look up repo projects
+            const owner = context.repo.owner;
+            const name  = context.repo.repo;
+            const getProjects = `
+              query($owner:String!, $name:String!) {
+                repository(owner:$owner, name:$name) {
+                  projectsV2(first: 20) {
+                    nodes { id title }
+                  }
+                }
+              }`;
+
+            const data = await github.graphql(getProjects, { owner, name });
+            const projects = data?.repository?.projectsV2?.nodes ?? [];
+            const match = projects.find(p => p.title === "${{ inputs.REPO_PROJECT_TITLE }}");
+
+            if (match?.id) {
+              await github.graphql(addMutation, {
+                projectId: match.id,
+                contentId: nodeId
+              });
+            } else {
+              core.info(`No repo project titled "${{ inputs.REPO_PROJECT_TITLE }}" found. Added only to org project.`);
+            }
